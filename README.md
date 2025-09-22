@@ -1,0 +1,87 @@
+<!-- 
+This README describes the package. If you publish this package to pub.dev,
+this README's contents appear on the landing page for your package.
+
+For information about how to write a good package README, see the guide for
+[writing package pages](https://dart.dev/guides/libraries/writing-package-pages). 
+
+For general information about developing packages, see the Dart guide for
+[creating packages](https://dart.dev/guides/libraries/create-library-packages)
+and the Flutter guide for
+[developing packages and plugins](https://flutter.dev/developing-packages). 
+-->
+
+Regras de lint focadas em prevenir problemas de performance e uso incorreto de recursos.
+
+## Features
+
+- `missing_dispose`: Detecta objetos descartáveis instanciados e não descartados:
+	- Variáveis locais
+	- Campos de classes (incluindo subclasses de `State`) que não são liberados em `dispose()`
+	- Suporta métodos de descarte: `dispose()`, `close()`, `cancel()`
+
+## Getting started
+
+Adicione no `dev_dependencies` do seu projeto principal:
+
+```yaml
+dev_dependencies:
+	custom_lint: ^0.6.4
+	performance_lints:
+		path: ../caminho/para/performance_lints
+```
+
+Crie (ou edite) `analysis_options.yaml` no seu app:
+
+```yaml
+analyzer:
+	plugins:
+		- custom_lint
+```
+
+## Usage
+
+Exemplo que gera a lint:
+
+```dart
+void exemplo() {
+	final controller = StreamController(); // LINT: missing_dispose
+	controller.add(1);
+}
+```
+
+Correção esperada:
+
+```dart
+void exemplo() {
+	final controller = StreamController();
+	try {
+		controller.add(1);
+	} finally {
+		controller.close(); // ou controller.dispose() dependendo da API
+	}
+}
+```
+
+Para casos simples:
+
+```dart
+void exemplo2() {
+	final focus = FocusNode();
+	// uso
+	focus.dispose();
+}
+```
+
+## Limitações atuais
+
+- Não segue fluxo de controle complexo (ex.: múltiplos returns condicionais antes do descarte)
+- Não infere descarte indireto via helpers/DI (ex.: passado para outro objeto que gerencia o ciclo de vida)
+- Não analisa descarte em mixins separados ainda
+- Métodos sinônimos configurados fixos (`dispose/close/cancel`) – futuramente configurável
+
+Contribuições para heurísticas mais robustas são bem-vindas.
+
+## Contribuindo
+
+Abra issues ou PRs descrevendo cenários adicionais. 
