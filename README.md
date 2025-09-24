@@ -19,7 +19,7 @@ dev_dependencies:
 	performance_lints:
 		git:
 			url: git@github.com:vinicioshenriques/performance_lints.git
-			ref: master
+			ref: v1.0.0
 ```
 
 Crie (ou edite) `analysis_options.yaml` no seu app:
