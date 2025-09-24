@@ -28,7 +28,9 @@ Adicione no `dev_dependencies` do seu projeto principal:
 dev_dependencies:
 	custom_lint: ^0.6.4
 	performance_lints:
-		path: ../caminho/para/performance_lints
+		git:
+			url: git@github.com:vinicioshenriques/performance_lints.git
+			ref: master
 ```
 
 Crie (ou edite) `analysis_options.yaml` no seu app:
@@ -38,6 +40,14 @@ analyzer:
 	plugins:
 		- custom_lint
 ```
+
+e no terminal rode:
+
+```bash
+dart run custom_lint
+```
+
+Após isso as novas regras estarão ativas, já sendo exibidas na aba dart analysis do seu editor.
 
 ## Usage
 
