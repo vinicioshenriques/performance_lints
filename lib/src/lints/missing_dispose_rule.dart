@@ -225,23 +225,56 @@ class _FieldAssignmentScanner extends RecursiveAstVisitor<void> {
     return null;
   }
 
+  bool _exprContainsInstanceCreation(Expression? expr) {
+    if (expr == null) return false;
+    if (expr is InstanceCreationExpression) return true;
+    final finder = _InstanceCreationFinder();
+    expr.visitChildren(finder);
+    return finder.found;
+  }
+
   @override
   void visitAssignmentExpression(AssignmentExpression node) {
     final left = node.leftHandSide;
     final right = node.rightHandSide;
     final fieldName = _extractAssignedFieldName(left);
     if (fieldName != null && candidateFieldNames.contains(fieldName)) {
-      if (right is InstanceCreationExpression) {
-        final type = _getInterfaceTypeFromInstanceCreation(right);
-        final isDisposable = _hasDisposableMethod(type, disposableMethodNames) || _isKnownDisposableCtor(right);
-        if (isDisposable) {
-          // Não temos referência ao VariableDeclaration original aqui obrigatoriamente.
-          // Mantemos mapa sinalizando que o campo é descartável.
+      // Detect instance creation anywhere in the right-hand side expression
+      // (handles `widget.x ?? FocusNode()` and similar patterns).
+      if (_exprContainsInstanceCreation(right)) {
+        // We can't always resolve the exact InstanceCreationExpression here
+        // to pass to _getInterfaceTypeFromInstanceCreation, so conservatively
+        // mark the field as disposable if any instance creation is present
+        // and the type name matches known disposable ctors or has a dispose-like method.
+        // Try to find an InstanceCreationExpression child to check more precisely.
+        InstanceCreationExpression? found;
+        right.accept(_InstanceCreationFinder((expr) => found ??= expr));
+        if (found != null) {
+          final foundExpr = found;
+          final type = _getInterfaceTypeFromInstanceCreation(foundExpr!);
+          final isDisposable = _hasDisposableMethod(type, disposableMethodNames) || _isKnownDisposableCtor(foundExpr);
+          if (isDisposable) {
+            disposableAssignedFields[fieldName] = null;
+          }
+        } else {
+          // If we couldn't get the concrete node, conservatively mark it.
           disposableAssignedFields[fieldName] = null;
         }
       }
     }
     super.visitAssignmentExpression(node);
+  }
+}
+
+class _InstanceCreationFinder extends RecursiveAstVisitor<void> {
+  bool found = false;
+  final void Function(InstanceCreationExpression)? onFound;
+  _InstanceCreationFinder([this.onFound]);
+
+  @override
+  void visitInstanceCreationExpression(InstanceCreationExpression node) {
+    found = true;
+    if (onFound != null) onFound!(node);
   }
 }
 
