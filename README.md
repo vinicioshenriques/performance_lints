@@ -78,9 +78,3 @@ void exemplo2() {
 - Não infere descarte indireto via helpers/DI (ex.: passado para outro objeto que gerencia o ciclo de vida)
 - Não analisa descarte em mixins separados ainda
 - Métodos sinônimos configurados fixos (`dispose/close/cancel`) – futuramente configurável
-
-Contribuições para heurísticas mais robustas são bem-vindas.
-
-## Contribuindo
-
-Abra issues ou PRs descrevendo cenários adicionais. 
