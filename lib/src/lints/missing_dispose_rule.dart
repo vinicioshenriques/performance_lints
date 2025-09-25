@@ -192,19 +192,19 @@ class _FieldDisposeVisitor extends RecursiveAstVisitor<void> {
       if (target is Identifier) {
         called.add(target.name);
       } else if (target is PropertyAccess) {
-        // Handles `this.controller.dispose()` and `widget.controller.dispose()`
+        // Trata `this.controller.dispose()` e `widget.controller.dispose()`
         final propertyName = target.propertyName.name;
         called.add(propertyName);
       } else if (target is PrefixedIdentifier) {
         called.add(target.identifier.name);
       } else if (target is SuperExpression) {
-        // Handles `super.dispose()`
-        // This is a call to the superclass's method, which we assume
-        // correctly disposes of its own resources. We don't need to track
-        // specific fields here, but this prevents false positives if a dispose
-        // method *only* calls super.dispose().
-        // We can consider adding a special value to 'called' if we need to
-        // distinguish this case, e.g., called.add('super.dispose');
+        // Trata `super.dispose()`
+        // Esta é uma chamada ao método da superclasse, que assumimos
+        // que descarte corretamente seus próprios recursos. Não precisamos
+        // rastrear campos específicos aqui, mas isso evita falsos-positivos
+        // se um método dispose chamar apenas super.dispose().
+        // Podemos considerar adicionar um valor especial em 'called' se
+        // precisarmos distinguir esse caso, por exemplo: called.add('super.dispose');
       }
     }
     super.visitMethodInvocation(node);
@@ -239,14 +239,19 @@ class _FieldAssignmentScanner extends RecursiveAstVisitor<void> {
     final right = node.rightHandSide;
     final fieldName = _extractAssignedFieldName(left);
     if (fieldName != null && candidateFieldNames.contains(fieldName)) {
-      // Detect instance creation anywhere in the right-hand side expression
-      // (handles `widget.x ?? FocusNode()` and similar patterns).
+      // Detecta criação de instância em qualquer lugar na expressão do lado direito
+      // (lida com `widget.x ?? FocusNode()` e padrões similares).
+      // Nem sempre conseguimos resolver a InstanceCreationExpression exata aqui
+      // para passar a _getInterfaceTypeFromInstanceCreation, então, de forma
+      // conservadora, marcamos o campo como descartável se qualquer criação de
+      // instância estiver presente e o nome do tipo corresponder a construtores
+      // conhecidos descartáveis ou tiver um método parecido com dispose.
+      // Tentar encontrar um filho InstanceCreationExpression para checar com mais precisão.
       if (_exprContainsInstanceCreation(right)) {
-        // We can't always resolve the exact InstanceCreationExpression here
-        // to pass to _getInterfaceTypeFromInstanceCreation, so conservatively
-        // mark the field as disposable if any instance creation is present
-        // and the type name matches known disposable ctors or has a dispose-like method.
-        // Try to find an InstanceCreationExpression child to check more precisely.
+        // Não conseguimos sempre obter o InstanceCreationExpression exato aqui
+        // para passar para _getInterfaceTypeFromInstanceCreation, então
+        // marcamos conservadoramente o campo como descartável se houver
+        // qualquer criação de instância e o tipo parecer descartável.
         InstanceCreationExpression? found;
         right.accept(_InstanceCreationFinder((expr) => found ??= expr));
         if (found != null) {
@@ -257,7 +262,7 @@ class _FieldAssignmentScanner extends RecursiveAstVisitor<void> {
             disposableAssignedFields[fieldName] = null;
           }
         } else {
-          // If we couldn't get the concrete node, conservatively mark it.
+          // Se não conseguirmos obter o nó concreto, marcar conservadoramente.
           disposableAssignedFields[fieldName] = null;
         }
       }
@@ -283,7 +288,7 @@ InterfaceType? _getInterfaceTypeFromInstanceCreation(InstanceCreationExpression 
   if (t is InterfaceType) return t;
   final ctor = expr.constructorName.staticElement;
   if (ctor != null) {
-    final enclosing3 = (ctor as dynamic).enclosingElement3; // compat com analyzer >=6
+    final enclosing3 = (ctor as dynamic).enclosingElement3; // compatível com analyzer >=6
     if (enclosing3 is ClassElement) return enclosing3.thisType;
     final enclosing = ctor.enclosingElement;
     if (enclosing is ClassElement) return enclosing.thisType;
