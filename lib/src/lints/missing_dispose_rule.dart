@@ -81,17 +81,19 @@ class MissingDisposeRule extends DartLintRule {
               disposableFields[name] = variable;
             }
           } else {
-            // Pode ser atribuído depois (initState/constructor). Registrar para análise posterior.
+            // Pode ser atribuído depois (initState/constructor/didInitState). Registrar para análise posterior.
             undecidedFieldNames[name] = variable;
           }
         }
       }
     }
 
-    // Vasculhar initState/constructor para atribuições a esses campos.
+    // Vasculhar métodos e construtores para atribuições a esses campos.
+    // Originalmente verificávamos apenas initState/constructors; estendemos para todos os métodos
+    // porque quem usa mixins ou callbacks (ex.: didInitState) pode criar instâncias lá.
     final assignmentScanner = _FieldAssignmentScanner(disposableMethodNames, undecidedFieldNames.keys.toSet());
     for (final member in clazz.members) {
-      if (member is MethodDeclaration && member.name.lexeme == 'initState') {
+      if (member is MethodDeclaration) {
         member.body.visitChildren(assignmentScanner);
       } else if (member is ConstructorDeclaration) {
         member.body.visitChildren(assignmentScanner);
@@ -318,6 +320,14 @@ bool _isKnownDisposableCtor(InstanceCreationExpression expr) {
     'ChangeNotifier',
     'ValueNotifier',
     'StreamSubscription',
+    'OverlayEntry',
+    'Ticker',
+    'Timer',
+    'GestureRecognizer',
+    'HttpClient',
+    'StreamSink',
+    'ImageStream',
+    'ImageStreamListener',
   };
   return known.contains(simpleName);
 }
