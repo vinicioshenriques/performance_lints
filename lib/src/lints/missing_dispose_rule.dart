@@ -1,9 +1,10 @@
-import 'package:custom_lint_builder/custom_lint_builder.dart';
+import 'package:analyzer/analysis_rule/analysis_rule.dart';
+import 'package:analyzer/analysis_rule/rule_context.dart';
+import 'package:analyzer/analysis_rule/rule_visitor_registry.dart';
 import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/ast/visitor.dart';
-import 'package:analyzer/error/listener.dart';
 import 'package:analyzer/dart/element/type.dart';
-import 'package:analyzer/dart/element/element.dart';
+import 'package:analyzer/error/error.dart';
 
 /// Lint que detecta instâncias de tipos descartáveis (com método `dispose`) que
 /// não tiveram `dispose` chamado antes do fim do escopo.
@@ -12,162 +13,178 @@ import 'package:analyzer/dart/element/element.dart';
 ///   cujo elemento possui um método `dispose()` público sem parâmetros.
 /// - Verifica se no corpo do escopo existe uma invocation `ident.dispose()`.
 /// - Ignora casos retornados imediatamente ou atribuídos a `_`.
-class MissingDisposeRule extends DartLintRule {
-  MissingDisposeRule() : super(code: _code);
+final Set<String> _disposableMethodNames = {'dispose', 'close', 'cancel'};
 
-  static const _code = LintCode(
-    name: 'missing_dispose',
-    problemMessage: 'Objeto descartável criado mas dispose() não foi chamado neste escopo.',
+class MissingDisposeRule extends AnalysisRule {
+  static const LintCode _code = LintCode(
+    'missing_dispose',
+    'Objeto descartável criado mas dispose() não foi chamado neste escopo.',
     correctionMessage: 'Chame dispose() antes de sair do escopo.',
-    url: 'https://github.com/your_org/performance_lints#missing_dispose',
   );
 
+  MissingDisposeRule()
+    : super(
+        name: 'missing_dispose',
+        description:
+            'Detecta objetos descartáveis instanciados e não descartados.',
+      );
+
   @override
-  void run(CustomLintResolver resolver, ErrorReporter reporter, CustomLintContext context) {
-    final disposableMethodNames = const {'dispose', 'close', 'cancel'};
+  LintCode get diagnosticCode => _code;
 
-    context.registry.addBlockFunctionBody((body) {
-      _analyzeLocalBlock(body, reporter, disposableMethodNames);
-    });
-    context.registry.addConstructorDeclaration((decl) {
-      if (decl.body case final BlockFunctionBody block) {
-        _analyzeLocalBlock(block, reporter, disposableMethodNames);
-      }
-    });
-    context.registry.addMethodDeclaration((decl) {
-      if (decl.body case final BlockFunctionBody block) {
-        _analyzeLocalBlock(block, reporter, disposableMethodNames);
-      }
-    });
-    context.registry.addClassDeclaration((clazz) {
-      _analyzeClass(clazz, reporter, disposableMethodNames);
-    });
+  @override
+  void registerNodeProcessors(
+    RuleVisitorRegistry registry,
+    RuleContext context,
+  ) {
+    final visitor = _Visitor(this);
+    // Cobre corpos de funções, métodos e construtores (todos são
+    // BlockFunctionBody), sem precisar registrar cada declaração separadamente.
+    registry.addBlockFunctionBody(this, visitor);
+    registry.addClassDeclaration(this, visitor);
   }
+}
 
-  void _analyzeLocalBlock(BlockFunctionBody body, ErrorReporter reporter, Set<String> disposableMethodNames) {
-    final collector = _LocalDisposableCollector(disposableMethodNames);
-    body.block.visitChildren(collector);
+class _Visitor extends SimpleAstVisitor<void> {
+  final MissingDisposeRule rule;
+
+  _Visitor(this.rule);
+
+  @override
+  void visitBlockFunctionBody(BlockFunctionBody node) {
+    final collector = _LocalDisposableCollector();
+    node.block.visitChildren(collector);
     for (final candidate in collector.candidates) {
-      final wasDisposed = collector.disposedIdentifiers.contains(candidate.variableName);
+      final wasDisposed = collector.disposedIdentifiers.contains(
+        candidate.variableName,
+      );
       if (!wasDisposed) {
-        reporter.reportErrorForNode(_code, candidate.creationNode);
+        rule.reportAtNode(candidate.creationNode);
       }
     }
   }
 
-  void _analyzeClass(ClassDeclaration clazz, ErrorReporter reporter, Set<String> disposableMethodNames) {
-    final classElement = clazz.declaredElement;
-    if (classElement == null) return;
+  @override
+  void visitClassDeclaration(ClassDeclaration node) {
+    _analyzeClass(node, rule);
+  }
+}
 
-    // Classes que possuem ciclo de vida conhecido onde esperamos descarte:
-    // - State (StatefulWidget)
-    // - ChangeNotifier (ex.: ViewModels)
-    // - StatelessWidget (não possui dispose, mas não deve conter controladores)
-    final superNames = classElement.allSupertypes.map((t) => t.element.name).toSet();
-    final isLifecycleOwner = superNames.contains('State') || superNames.contains('ChangeNotifier') || superNames.contains('StatelessWidget');
+void _analyzeClass(ClassDeclaration clazz, MissingDisposeRule rule) {
+  final classElement = clazz.declaredFragment?.element;
+  if (classElement == null) return;
 
-    // Mapear campos potencialmente descartáveis (mesmo sem init direto).
-    final disposableFields = <String, VariableDeclaration>{};
-    final undecidedFieldNames = <String, VariableDeclaration>{};
-    for (final member in clazz.members) {
-      if (member is FieldDeclaration) {
-        for (final variable in member.fields.variables) {
-          final name = variable.name.lexeme;
-          final init = variable.initializer;
-          if (init is InstanceCreationExpression) {
-            final type = _getInterfaceTypeFromInstanceCreation(init);
-            final isDisposable = _hasDisposableMethod(type, disposableMethodNames) || _isKnownDisposableCtor(init);
-            if (isDisposable) {
-              disposableFields[name] = variable;
-            }
-          } else {
-            // Pode ser atribuído depois (initState/constructor/didInitState). Registrar para análise posterior.
-            undecidedFieldNames[name] = variable;
-          }
+  // Classes que possuem ciclo de vida conhecido onde esperamos descarte:
+  // - State (StatefulWidget)
+  // - ChangeNotifier (ex.: ViewModels)
+  // - StatelessWidget (não possui dispose, mas não deve conter controladores)
+  final superNames = classElement.allSupertypes
+      .map((t) => t.element.name)
+      .toSet();
+  final isLifecycleOwner =
+      superNames.contains('State') ||
+      superNames.contains('ChangeNotifier') ||
+      superNames.contains('StatelessWidget');
+
+  // Mapear campos potencialmente descartáveis (mesmo sem init direto).
+  final disposableFields = <String, VariableDeclaration>{};
+  final undecidedFieldNames = <String, VariableDeclaration>{};
+  for (final member in clazz.body.members) {
+    if (member is FieldDeclaration) {
+      for (final variable in member.fields.variables) {
+        final name = variable.name.lexeme;
+        final init = variable.initializer;
+        if (init != null && _isDisposableExpression(init)) {
+          disposableFields[name] = variable;
+        } else {
+          // Pode ser atribuído depois (initState/constructor/didInitState). Registrar para análise posterior.
+          undecidedFieldNames[name] = variable;
         }
       }
     }
+  }
 
-    // Vasculhar métodos e construtores para atribuições a esses campos.
-    // Originalmente verificávamos apenas initState/constructors; estendemos para todos os métodos
-    // porque quem usa mixins ou callbacks (ex.: didInitState) pode criar instâncias lá.
-    final assignmentScanner = _FieldAssignmentScanner(disposableMethodNames, undecidedFieldNames.keys.toSet());
-    for (final member in clazz.members) {
-      if (member is MethodDeclaration) {
-        member.body.visitChildren(assignmentScanner);
-      } else if (member is ConstructorDeclaration) {
-        member.body.visitChildren(assignmentScanner);
+  // Vasculhar métodos e construtores para atribuições a esses campos.
+  // Originalmente verificávamos apenas initState/constructors; estendemos para todos os métodos
+  // porque quem usa mixins ou callbacks (ex.: didInitState) pode criar instâncias lá.
+  final assignmentScanner = _FieldAssignmentScanner(
+    undecidedFieldNames.keys.toSet(),
+  );
+  for (final member in clazz.body.members) {
+    if (member is MethodDeclaration) {
+      member.body.visitChildren(assignmentScanner);
+    } else if (member is ConstructorDeclaration) {
+      member.body.visitChildren(assignmentScanner);
+    }
+  }
+  // Promover campos detectados como descartáveis por atribuições.
+  for (final entry in assignmentScanner.disposableAssignedFields.entries) {
+    final original = undecidedFieldNames[entry.key];
+    if (original != null) {
+      disposableFields[entry.key] = original;
+    }
+  }
+
+  if (disposableFields.isEmpty) return;
+
+  // Procurar método dispose dentro da classe
+  MethodDeclaration? disposeMethod;
+  for (final member in clazz.body.members) {
+    if (member is MethodDeclaration &&
+        member.name.lexeme == 'dispose' &&
+        member.parameters?.parameters.isEmpty == true) {
+      disposeMethod = member;
+      break;
+    }
+  }
+
+  if (disposeMethod == null) {
+    // Se for um tipo com ciclo de vida conhecido (State/ChangeNotifier/StatelessWidget)
+    // e possui campos descartáveis, reportar ausência de dispose nos próprios campos.
+    if (isLifecycleOwner) {
+      for (final entry in disposableFields.entries) {
+        rule.reportAtOffset(
+          entry.value.name.offset,
+          entry.value.name.length,
+        );
       }
     }
-    // Promover campos detectados como descartáveis por atribuições.
-    for (final entry in assignmentScanner.disposableAssignedFields.entries) {
-      final original = undecidedFieldNames[entry.key];
-      if (original != null) {
-        disposableFields[entry.key] = original;
-      }
+    return; // Sem método dispose para analisar chamadas
+  }
+
+  final calledInDispose = <String>{};
+  if (disposeMethod.body is BlockFunctionBody) {
+    final body = (disposeMethod.body as BlockFunctionBody).block;
+    for (final stmt in body.statements) {
+      stmt.visitChildren(_FieldDisposeVisitor(calledInDispose));
     }
+  }
 
-    if (disposableFields.isEmpty) return;
-
-    // Procurar método dispose dentro da classe
-    MethodDeclaration? disposeMethod;
-    for (final member in clazz.members) {
-      if (member is MethodDeclaration && member.name.lexeme == 'dispose' && member.parameters?.parameters.isEmpty == true) {
-        disposeMethod = member;
-        break;
-      }
-    }
-
-    if (disposeMethod == null) {
-      // Se for um tipo com ciclo de vida conhecido (State/ChangeNotifier/StatelessWidget)
-      // e possui campos descartáveis, reportar ausência de dispose nos próprios campos.
-      if (isLifecycleOwner) {
-        for (final entry in disposableFields.entries) {
-          reporter.reportErrorForOffset(_code, entry.value.name.offset, entry.value.name.length);
-        }
-      }
-      return; // Sem método dispose para analisar chamadas
-    }
-
-    final calledInDispose = <String>{};
-    if (disposeMethod.body is BlockFunctionBody) {
-      final body = (disposeMethod.body as BlockFunctionBody).block;
-      for (final stmt in body.statements) {
-        stmt.visitChildren(_FieldDisposeVisitor(disposableMethodNames, calledInDispose));
-      }
-    }
-
-    // Quais campos não foram descartados?
-    for (final entry in disposableFields.entries) {
-      if (!calledInDispose.contains(entry.key)) {
-        reporter.reportErrorForOffset(_code, entry.value.name.offset, entry.value.name.length);
-      }
+  // Quais campos não foram descartados?
+  for (final entry in disposableFields.entries) {
+    if (!calledInDispose.contains(entry.key)) {
+      rule.reportAtOffset(entry.value.name.offset, entry.value.name.length);
     }
   }
 }
 
 class _LocalDisposableCandidate {
   final String variableName;
-  final InstanceCreationExpression creationNode;
+  final Expression creationNode;
   _LocalDisposableCandidate(this.variableName, this.creationNode);
 }
 
 class _LocalDisposableCollector extends RecursiveAstVisitor<void> {
-  final Set<String> disposableMethodNames;
   final List<_LocalDisposableCandidate> candidates = [];
   final Set<String> disposedIdentifiers = {};
-
-  _LocalDisposableCollector(this.disposableMethodNames);
 
   @override
   void visitVariableDeclaration(VariableDeclaration node) {
     final init = node.initializer;
-    if (init is InstanceCreationExpression) {
-      final type = _getInterfaceTypeFromInstanceCreation(init);
-      final isDisposable = _hasDisposableMethod(type, disposableMethodNames) || _isKnownDisposableCtor(init);
-      if (isDisposable && node.name.lexeme != '_') {
-        candidates.add(_LocalDisposableCandidate(node.name.lexeme, init));
-      }
+    if (init != null &&
+        node.name.lexeme != '_' &&
+        _isDisposableExpression(init)) {
+      candidates.add(_LocalDisposableCandidate(node.name.lexeme, init));
     }
     super.visitVariableDeclaration(node);
   }
@@ -175,7 +192,8 @@ class _LocalDisposableCollector extends RecursiveAstVisitor<void> {
   @override
   void visitMethodInvocation(MethodInvocation node) {
     final target = node.realTarget;
-    if (disposableMethodNames.contains(node.methodName.name) && target is Identifier) {
+    if (_disposableMethodNames.contains(node.methodName.name) &&
+        target is Identifier) {
       disposedIdentifiers.add(target.name);
     }
     super.visitMethodInvocation(node);
@@ -183,14 +201,13 @@ class _LocalDisposableCollector extends RecursiveAstVisitor<void> {
 }
 
 class _FieldDisposeVisitor extends RecursiveAstVisitor<void> {
-  final Set<String> disposableMethodNames;
   final Set<String> called;
-  _FieldDisposeVisitor(this.disposableMethodNames, this.called);
+  _FieldDisposeVisitor(this.called);
 
   @override
   void visitMethodInvocation(MethodInvocation node) {
     final target = node.realTarget;
-    if (disposableMethodNames.contains(node.methodName.name)) {
+    if (_disposableMethodNames.contains(node.methodName.name)) {
       if (target is Identifier) {
         called.add(target.name);
       } else if (target is PropertyAccess) {
@@ -205,8 +222,6 @@ class _FieldDisposeVisitor extends RecursiveAstVisitor<void> {
         // que descarte corretamente seus próprios recursos. Não precisamos
         // rastrear campos específicos aqui, mas isso evita falsos-positivos
         // se um método dispose chamar apenas super.dispose().
-        // Podemos considerar adicionar um valor especial em 'called' se
-        // precisarmos distinguir esse caso, por exemplo: called.add('super.dispose');
       }
     }
     super.visitMethodInvocation(node);
@@ -214,11 +229,10 @@ class _FieldDisposeVisitor extends RecursiveAstVisitor<void> {
 }
 
 class _FieldAssignmentScanner extends RecursiveAstVisitor<void> {
-  final Set<String> disposableMethodNames;
   final Set<String> candidateFieldNames;
   final Map<String, VariableDeclaration?> disposableAssignedFields = {};
 
-  _FieldAssignmentScanner(this.disposableMethodNames, this.candidateFieldNames);
+  _FieldAssignmentScanner(this.candidateFieldNames);
 
   String? _extractAssignedFieldName(Expression left) {
     if (left is Identifier) return left.name;
@@ -227,74 +241,83 @@ class _FieldAssignmentScanner extends RecursiveAstVisitor<void> {
     return null;
   }
 
-  bool _exprContainsInstanceCreation(Expression? expr) {
-    if (expr == null) return false;
-    if (expr is InstanceCreationExpression) return true;
-    final finder = _InstanceCreationFinder();
-    expr.visitChildren(finder);
-    return finder.found;
-  }
-
   @override
   void visitAssignmentExpression(AssignmentExpression node) {
     final left = node.leftHandSide;
     final right = node.rightHandSide;
     final fieldName = _extractAssignedFieldName(left);
     if (fieldName != null && candidateFieldNames.contains(fieldName)) {
-      // Detecta criação de instância em qualquer lugar na expressão do lado direito
-      // (lida com `widget.x ?? FocusNode()` e padrões similares).
-      // Nem sempre conseguimos resolver a InstanceCreationExpression exata aqui
-      // para passar a _getInterfaceTypeFromInstanceCreation, então, de forma
-      // conservadora, marcamos o campo como descartável se qualquer criação de
-      // instância estiver presente e o nome do tipo corresponder a construtores
-      // conhecidos descartáveis ou tiver um método parecido com dispose.
-      // Tentar encontrar um filho InstanceCreationExpression para checar com mais precisão.
-      if (_exprContainsInstanceCreation(right)) {
-        // Não conseguimos sempre obter o InstanceCreationExpression exato aqui
-        // para passar para _getInterfaceTypeFromInstanceCreation, então
-        // marcamos conservadoramente o campo como descartável se houver
-        // qualquer criação de instância e o tipo parecer descartável.
-        InstanceCreationExpression? found;
-        right.accept(_InstanceCreationFinder((expr) => found ??= expr));
-        if (found != null) {
-          final foundExpr = found;
-          final type = _getInterfaceTypeFromInstanceCreation(foundExpr!);
-          final isDisposable = _hasDisposableMethod(type, disposableMethodNames) || _isKnownDisposableCtor(foundExpr);
-          if (isDisposable) {
-            disposableAssignedFields[fieldName] = null;
-          }
-        } else {
-          // Se não conseguirmos obter o nó concreto, marcar conservadoramente.
-          disposableAssignedFields[fieldName] = null;
-        }
+      // Verifica a própria expressão do lado direito e, se não for
+      // descartável diretamente (ex.: `widget.x ?? FocusNode()`, ou o
+      // resultado de uma chamada de método como `stream.listen(...)`),
+      // procura em qualquer subexpressão aninhada.
+      final finder = _DisposableExpressionFinder();
+      right.accept(finder);
+      if (finder.found != null) {
+        disposableAssignedFields[fieldName] = null;
       }
     }
     super.visitAssignmentExpression(node);
   }
 }
 
-class _InstanceCreationFinder extends RecursiveAstVisitor<void> {
-  bool found = false;
-  final void Function(InstanceCreationExpression)? onFound;
-  _InstanceCreationFinder([this.onFound]);
+/// Percorre uma expressão procurando a primeira que seja "descartável" —
+/// seja uma criação de instância de um tipo conhecido, seja qualquer
+/// expressão cujo tipo estático exponha `dispose`/`close`/`cancel`. Isso
+/// cobre não apenas `Foo()`, mas também retornos de métodos como
+/// `stream.listen(...)` (que devolve um `StreamSubscription`) ou getters que
+/// exponham um objeto descartável.
+///
+/// A descida só continua por combinadores "transparentes", que preservam o
+/// valor original (`??`, expressão condicional, parênteses, `as`). Não
+/// descemos em listas de argumentos de chamadas/construções (`Foo(bar)`),
+/// pois ali `bar` está sendo apenas repassado como parâmetro — não se torna
+/// o valor atribuído ao campo — o que evitaria falsos positivos como
+/// `_owner = _ScrollOwner(_scrollController)`.
+class _DisposableExpressionFinder extends GeneralizingAstVisitor<void> {
+  Expression? found;
 
   @override
-  void visitInstanceCreationExpression(InstanceCreationExpression node) {
-    found = true;
-    if (onFound != null) onFound!(node);
+  void visitExpression(Expression node) {
+    if (found != null) return;
+    if (_isDisposableExpression(node)) {
+      found = node;
+      return;
+    }
+    final isTransparentCombinator =
+        (node is BinaryExpression && node.operator.lexeme == '??') ||
+        node is ConditionalExpression ||
+        node is ParenthesizedExpression ||
+        node is AsExpression;
+    if (isTransparentCombinator) {
+      super.visitExpression(node);
+    }
   }
 }
 
-InterfaceType? _getInterfaceTypeFromInstanceCreation(InstanceCreationExpression expr) {
+/// Decide se [expr] produz um valor descartável. Verifica primeiro o tipo
+/// estático da própria expressão (o que cobre criações diretas `Foo()`,
+/// chamadas de método como `stream.listen(...)`, e getters), com um
+/// fallback específico para construtores conhecidos quando o tipo não pôde
+/// ser resolvido.
+bool _isDisposableExpression(Expression expr) {
+  if (_hasDisposableMethod(expr.staticType)) return true;
+  if (expr is InstanceCreationExpression) {
+    final resolvedType = _getInterfaceTypeFromInstanceCreation(expr);
+    if (_hasDisposableMethod(resolvedType)) return true;
+    return _isKnownDisposableCtor(expr);
+  }
+  return false;
+}
+
+InterfaceType? _getInterfaceTypeFromInstanceCreation(
+  InstanceCreationExpression expr,
+) {
   final t = expr.staticType;
   if (t is InterfaceType) return t;
-  final ctor = expr.constructorName.staticElement;
-  if (ctor != null) {
-    final enclosing3 = (ctor as dynamic).enclosingElement3; // compatível com analyzer >=6
-    if (enclosing3 is ClassElement) return enclosing3.thisType;
-    final enclosing = ctor.enclosingElement;
-    if (enclosing is ClassElement) return enclosing.thisType;
-  }
+  final ctorElement = expr.constructorName.element;
+  final enclosing = ctorElement?.enclosingElement;
+  if (enclosing != null) return enclosing.thisType;
   // Fallback: tentar tipo do TypeName
   final typeName = expr.constructorName.type.type;
   if (typeName is InterfaceType) return typeName;
@@ -303,9 +326,7 @@ InterfaceType? _getInterfaceTypeFromInstanceCreation(InstanceCreationExpression 
 
 bool _isKnownDisposableCtor(InstanceCreationExpression expr) {
   final typeNode = expr.constructorName.type;
-  final name = typeNode.name2;
-
-  final simpleName = name.lexeme;
+  final simpleName = typeNode.name.lexeme;
 
   // Lista mínima para reduzir falso-positivo; pode ser expandida futuramente.
   const known = {
@@ -332,13 +353,15 @@ bool _isKnownDisposableCtor(InstanceCreationExpression expr) {
   return known.contains(simpleName);
 }
 
-bool _hasDisposableMethod(DartType? type, Set<String> disposableMethodNames) {
+bool _hasDisposableMethod(DartType? type) {
   final interfaceType = type is InterfaceType ? type : null;
   if (interfaceType == null) return false;
 
-  for (final name in disposableMethodNames) {
+  for (final name in _disposableMethodNames) {
     final method = interfaceType.getMethod(name);
-    if (method != null && !method.isStatic && method.parameters.isEmpty) {
+    if (method != null &&
+        !method.isStatic &&
+        method.formalParameters.isEmpty) {
       return true;
     }
   }

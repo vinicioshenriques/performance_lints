@@ -2,6 +2,8 @@
 
 Regras de lint focadas em prevenir problemas de performance e uso incorreto de recursos.
 
+A partir da versão 2.0.0, este pacote é um **analyzer plugin nativo** (via `package:analysis_server_plugin`), o sistema oficial de plugins do analyzer disponível a partir do Dart 3.10 (Flutter 3.38). O antigo framework `custom_lint`, usado nas versões 1.x, foi descontinuado (repositório arquivado) e por isso o pacote foi migrado.
+
 ## Features
 
 - `missing_dispose`: Detecta objetos descartáveis instanciados e não descartados:
@@ -15,28 +17,23 @@ Adicione no `dev_dependencies` do seu projeto principal:
 
 ```yaml
 dev_dependencies:
-	custom_lint: ^0.6.4
-	performance_lints:
-		git:
-			url: git@github.com:vinicioshenriques/performance_lints.git
-			ref: v1.0.0
+  performance_lints:
+    git:
+      url: git@github.com:vinicioshenriques/performance_lints.git
+      ref: v2.0.0
 ```
 
-Crie (ou edite) `analysis_options.yaml` no seu app:
+Habilite o plugin e a regra no `analysis_options.yaml` da raiz do seu projeto (ou workspace):
 
 ```yaml
-analyzer:
-	plugins:
-		- custom_lint
+plugins:
+  performance_lints:
+    version: ^2.0.0
+    diagnostics:
+      missing_dispose: true
 ```
 
-e no terminal rode:
-
-```bash
-dart run custom_lint
-```
-
-Após isso as novas regras estarão ativas, já sendo exibidas na aba dart analysis do seu editor.
+Não é necessário rodar nenhum comando adicional: as diagnósticos aparecem diretamente no `dart analyze` / `flutter analyze` e no seu editor (após reiniciar o Dart Analysis Server ao alterar a seção `plugins`).
 
 ## Usage
 
@@ -75,6 +72,6 @@ void exemplo2() {
 ## Limitações atuais
 
 - Não segue fluxo de controle complexo (ex.: múltiplos returns condicionais antes do descarte)
-- Não infere descarte indireto via helpers/DI (ex.: passado para outro objeto que gerencia o ciclo de vida)
+- Não infere descarte indireto via helpers/DI (ex.: um controller passado para outro objeto que assume o ciclo de vida gera falso-positivo, pois o lint não enxerga o `dispose()` acontecendo na outra classe)
 - Não analisa descarte em mixins separados ainda
 - Métodos sinônimos configurados fixos (`dispose/close/cancel`) – futuramente configurável
